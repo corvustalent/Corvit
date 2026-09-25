@@ -1,3 +1,8 @@
+// Prompt hardcodeado en el servidor — el cliente solo manda parámetros de datos
+const SYSTEM_PROMPT = `Sos un recruiter IT senior con 10 años de experiencia en selección de talento. 
+Tu rol es dar feedback breve, directo y constructivo sobre respuestas de entrevista. 
+Máximo 2-3 oraciones. Sin bullets ni headers. Tono humano y profesional.`;
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -7,23 +12,32 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   const { question, chosen, correct, correctAnswer, context, module } = req.body;
-  if (!question || !chosen) {
-    return res.status(400).json({ error: 'Parámetros requeridos faltantes' });
+
+  if (!question || typeof question !== 'string' || question.length > 500) {
+    return res.status(400).json({ error: 'Parámetro inválido: question' });
+  }
+  if (!chosen || typeof chosen !== 'string' || chosen.length > 300) {
+    return res.status(400).json({ error: 'Parámetro inválido: chosen' });
+  }
+  if (typeof correct !== 'boolean') {
+    return res.status(400).json({ error: 'Parámetro inválido: correct' });
   }
 
   const mod = module === 'candidato'
-    ? 'candidato que está preparando una entrevista'
-    : 'entrevistador que está aprendiendo a evaluar candidatos';
+    ? 'candidato preparando una entrevista'
+    : 'entrevistador aprendiendo a evaluar candidatos';
 
-  const prompt = `Sos un recruiter IT senior con 10 años de experiencia. Un ${mod} respondió esta pregunta de preparación:
-
-Pregunta: "${question}"
-Respuesta elegida: "${chosen}"
-Era ${correct ? 'CORRECTA' : 'INCORRECTA'}.
-Respuesta correcta: "${correctAnswer}"
-Contexto: ${context}
-
-Dá un feedback breve y personalizado (2-3 oraciones máximo) sobre la respuesta elegida. Sé directo, útil y humano. Si fue correcta, reforzá por qué importa ese concepto. Si fue incorrecta, explicá el error de forma constructiva sin repetir lo que ya saben. No uses bullets ni headers.`;
+  const userMessage = [
+    `Contexto: Un ${mod} respondió una pregunta de preparación.`,
+    `Pregunta: ${question}`,
+    `Respuesta elegida: ${chosen}`,
+    `Resultado: ${correct ? 'CORRECTA' : 'INCORRECTA'}`,
+    correctAnswer ? `Respuesta correcta: ${correctAnswer}` : '',
+    context ? `Contexto adicional: ${context}` : '',
+    correct
+      ? 'Reforzá brevemente por qué esta respuesta es correcta y por qué importa en una entrevista real.'
+      : 'Explicá brevemente por qué esta respuesta es incorrecta y qué debería haber respondido, de forma constructiva.',
+  ].filter(Boolean).join('\n');
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -36,15 +50,20 @@ Dá un feedback breve y personalizado (2-3 oraciones máximo) sobre la respuesta
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 300,
-        messages: [{ role: 'user', content: prompt }],
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userMessage }],
       }),
     });
+
+    if (!response.ok) {
+      return res.status(502).json({ error: 'Error en la API de IA' });
+    }
 
     const data = await response.json();
     const text = data.content?.map(b => b.text || '').join('') || '';
     return res.status(200).json({ text });
 
   } catch (error) {
-    return res.status(500).json({ error: 'Error al generar feedback' });
+    return res.status(500).json({ error: 'Error interno del servidor' });
   }
 }
