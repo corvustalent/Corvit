@@ -604,33 +604,13 @@ async function analyzeCVWithAI(){
     msgIdx=(msgIdx+1)%loadingMsgs.length;
     document.getElementById('cv-loading-text').textContent=loadingMsgs[msgIdx];
   },2000);
-  const prompt=`Sos un recruiter IT senior con 10 años de experiencia y experto en CVs ATS-friendly. Analizá el CV adjunto y devolvé un análisis en formato JSON con exactamente esta estructura:
-
-{
-  "score": <número del 0 al 100>,
-  "score_color": <"green" si >=70, "yellow" si >=40, "red" si <40>,
-  "resumen": "<2-3 oraciones de diagnóstico general del CV>",
-  "fortalezas": ["<fortaleza 1>", "<fortaleza 2>", "<fortaleza 3>"],
-  "problemas_ats": ["<problema ATS 1>", "<problema ATS 2>"],
-  "mejoras": ["<mejora concreta 1>", "<mejora concreta 2>", "<mejora concreta 3>"],
-  "keywords_faltantes": ["<keyword 1>", "<keyword 2>", "<keyword 3>"],
-  "conclusion": "<1 oración de cierre con el consejo más importante>"
-}
-
-Sé directo, específico y útil. Respondé SOLO con el JSON, sin texto adicional.`;
   try{
-    const result=await callAI([{
-      role:'user',
-      content:[
-        {type:'document',source:{type:'base64',media_type:'application/pdf',data:cvBase64}},
-        {type:'text',text:prompt}
-      ]
-    }],{modelTier:'default'});
+    const rawText=await callCVAnalysisAI(cvBase64);
     clearInterval(msgInterval);
     document.getElementById('cv-loading').style.display='none';
     let data;
     try{
-      const clean=result.text.replace(/```json|```/g,'').trim();
+      const clean=rawText.replace(/```json|```/g,'').trim();
       data=JSON.parse(clean);
     }catch(e){throw new Error('parse_error');}
     const scoreColor=data.score_color==='green'?'#4ADE80':data.score_color==='yellow'?'#FBBF24':'#F87171';
@@ -690,23 +670,43 @@ function resetCV(){
   document.getElementById('cv-results').innerHTML='';
 }
 
-async function callAI(prompt, opts={}){
-  // Si hay runtime de Claude (artifact), usarlo
-  if(sampleAPI) return sampleAPI(prompt, opts);
-  // Fallback: llamada directa a la API de Anthropic
-  const messages = typeof prompt === 'string'
-    ? [{role:'user', content: prompt}]
-    : Array.isArray(prompt) ? prompt : [{role:'user', content: prompt}];
-  const body = {model:'claude-sonnet-4-6', max_tokens:1000, messages};
-  const res = await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)
+async function callFeedbackAI(question, chosen, correct, correctAnswer, context, module) {
+  if(sampleAPI) {
+    const mod = module === 'candidato' ? 'candidato que está preparando una entrevista' : 'entrevistador que está aprendiendo a evaluar candidatos';
+    const prompt = `Sos un recruiter IT senior con 10 años de experiencia. Un ${mod} respondió esta pregunta:\n\nPregunta: "${question}"\nRespuesta elegida: "${chosen}"\nEra ${correct?'CORRECTA':'INCORRECTA'}.\nRespuesta correcta: "${correctAnswer}"\nContexto: ${context}\n\nDá un feedback breve y personalizado (2-3 oraciones máximo). No uses bullets ni headers.`;
+    const result = await sampleAPI(prompt, { modelTier: 'quick' });
+    return result.text || '';
+  }
+  const res = await fetch('/api/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, chosen, correct, correctAnswer, context, module })
   });
   const data = await res.json();
-  const text = data.content?.map(b=>b.text||'').join('')||'';
-  if(opts.onText) opts.onText({text, delta:text});
-  return {text};
+  if(data.error) throw new Error(data.error);
+  return data.text || '';
+}
+
+async function callCVAnalysisAI(cvBase64) {
+  if(sampleAPI) {
+    const prompt = `Analizá el CV adjunto como recruiter IT senior. Devolvé SOLO un JSON con: score (0-100), score_color ("green"/"yellow"/"red"), resumen, fortalezas (array), problemas_ats (array), mejoras (array), keywords_faltantes (array), conclusion.`;
+    const result = await sampleAPI({
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: cvBase64 } },
+        { type: 'text', text: prompt }
+      ]
+    }, { modelTier: 'default' });
+    return result.text || '';
+  }
+  const res = await fetch('/api/analyze-cv', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cvBase64 })
+  });
+  const data = await res.json();
+  if(data.error) throw new Error(data.error);
+  return data.text || '';
 }
 
 function goToRubro(){if(!state.module)return;renderRubros();showScreen('screen-rubro');}
@@ -838,24 +838,12 @@ function selectMCOption(btn,isCorrect){
     feedbackEl.classList.add('visible');
     feedbackText.innerHTML='<span class="ai-thinking">Generando feedback personalizado...</span>';
     const chosenText=btn.querySelectorAll('span')[1].textContent;
-    const mod=state.module==='candidato'?'candidato que está preparando una entrevista':'entrevistador que está aprendiendo a evaluar candidatos';
-    const prompt=`Sos un recruiter IT senior con 10 años de experiencia. Un ${mod} respondió esta pregunta de preparación:
-
-Pregunta: "${q.q}"
-Respuesta elegida: "${chosenText}"
-Era ${isCorrect?'CORRECTA':'INCORRECTA'}.
-Respuesta correcta: "${q.options.find(o=>o.correct).text}"
-Contexto: ${q.a}
-
-Dá un feedback breve y personalizado (2-3 oraciones máximo) sobre la respuesta elegida. Sé directo, útil y humano. Si fue correcta, reforzá por qué importa ese concepto. Si fue incorrecta, explicá el error de forma constructiva sin repetir lo que ya saben. No uses bullets ni headers.`;
+    const correctAnswer=q.options.find(o=>o.correct)?.text||'';
     (async()=>{
       try{
-        let full='';
-        await callAI(prompt,{
-          modelTier:'quick',
-          onText:({text})=>{full=text;feedbackText.textContent=text;}
-        });
-        if(!full) feedbackEl.classList.remove('visible');
+        const text = await callFeedbackAI(q.q, chosenText, isCorrect, correctAnswer, q.a, state.module);
+        feedbackText.textContent = text || '';
+        if(!text) feedbackEl.classList.remove('visible');
       }catch(e){
         feedbackEl.classList.remove('visible');
       }
